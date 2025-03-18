@@ -9,6 +9,7 @@ from tqdm import tqdm
 from .model import GigaAM, GigaAMASR, GigaAMEmo
 from .preprocess import load_audio
 from .utils import format_time
+from .stream import AudioStream
 
 # Default cache directory
 _CACHE_DIR = os.path.expanduser("~/.cache/gigaam")

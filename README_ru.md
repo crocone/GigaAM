@@ -194,6 +194,50 @@ print(", ".join([f"{emotion}: {prob:.3f}" for emotion, prob in emotion2prob.item
 
 ---
 
+## Streaming
+
+from gigaam import load_model, AudioStream
+import numpy as np
+import sounddevice as sd
+
+# Загружаем модель
+model = load_model("ctc")
+
+# Параметры записи
+sample_rate = 16000
+
+# Функция обратного вызова для получения результатов
+def result_callback(result):
+    if result["is_final"]:
+        print(f"Финальный результат: {result['text']}")
+    else:
+        print(f"Промежуточный результат: {result['text']}")
+
+# Создаем экземпляр AudioStream
+stream = AudioStream(
+    model=model,
+    sample_rate=sample_rate,
+    callback=result_callback
+)
+
+# Функция обратного вызова для записи аудио
+def audio_callback(indata, frames, time, status):
+    # Преобразуем данные в 1D массив float32 в диапазоне [-1, 1]
+    audio_chunk = indata[:, 0].copy()
+    stream.add_audio_chunk(audio_chunk)
+
+# Запускаем запись аудио
+with sd.InputStream(callback=audio_callback, channels=1, samplerate=sample_rate):
+    print("Запись началась. Говорите в микрофон...")
+    try:
+        while True:
+            sd.sleep(100)  # Небольшая задержка для экономии ресурсов
+    except KeyboardInterrupt:
+        print("Запись остановлена")
+        stream.stop()
+
+---
+
 ## Лицензия
 
 Код и веса моделей семества GigaAM доступны для использования с [MIT-лицензией](./LICENSE).
@@ -203,3 +247,4 @@ print(", ".join([f"{emotion}: {prob:.3f}" for emotion, prob in emotion2prob.item
 * [[youtube] Как научить LLM слышать: GigaAM 🤝 GigaChat Audio](https://www.youtube.com/watch?v=O7NSH2SAwRc)
 * [[youtube] GigaAM: Семейство акустических моделей для русского языка](https://youtu.be/PvZuTUnZa2Q?t=26442)
 * [[youtube] Speech-only Pre-training: обучение универсального аудиоэнкодера](https://www.youtube.com/watch?v=ktO4Mx6UMNk)
+
