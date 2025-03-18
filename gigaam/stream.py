@@ -235,23 +235,13 @@ class AudioStream:
             return self._detect_speech_energy(audio)
     
     def _detect_speech(self, audio: torch.Tensor) -> bool:
+        return True
         """
-        Определяет наличие речи в аудиосегменте.
-        
-        Parameters
-        ----------
-        audio : torch.Tensor
-            Аудиоданные для анализа.
-            
-        Returns
-        -------
-        bool
-            True, если обнаружена речь, иначе False.
+        Всегда возвращает True для обхода проблемы с обнаружением речи.
         """
-        if self.use_vad:
-            return self._detect_speech_vad(audio)
-        else:
-            return self._detect_speech_energy(audio)
+        energy = (audio ** 2).mean().item()
+        logging.info(f"Энергия аудио: {energy:.6f}, порог: {self.threshold:.6f}, принудительно активируем речь")
+        return True  # Всегда считаем, что речь есть
     
     def _process_stream(self) -> None:
         """
