@@ -1,7 +1,6 @@
 import torch
 import numpy as np
-from typing import Optional, List, Tuple, Union, Dict, Callable
-from collections import deque
+from typing import Optional, List, Union, Dict, Callable
 import threading
 import time
 
@@ -262,13 +261,13 @@ class AudioStream:
         audio = audio.to(device)
         
         # Предобработка аудио
-        features = self.feature_extractor(
+        features, feature_lengths = self.feature_extractor(
             audio.unsqueeze(0), 
             torch.tensor([audio.shape[0]]).to(device)
         )
         
         # Кодирование
-        encoded, encoded_len = self.model.encoder(features, torch.tensor([features.shape[2]]).to(device))
+        encoded, encoded_len = self.model.encoder(features, feature_lengths)
         
         # Декодирование в зависимости от типа модели
         if hasattr(self.model, "rnnt_decoder"):
