@@ -4,6 +4,7 @@ from typing import Optional, List, Union, Dict, Callable
 import threading
 import time
 import os
+import logging
 
 from .model import GigaAMASR
 from .preprocess import FeatureExtractor
@@ -175,12 +176,18 @@ class AudioStream:
         if not self.use_vad:
             return self._detect_speech_energy(audio)
         
+        import logging
+        logging.info(f"VAD: Добавление {audio.shape[0]} сэмплов в буфер")
+        
         # Добавляем данные в VAD буфер
         self.vad_buffer.append(audio)
         
         # Если накоплено достаточно данных, анализируем
         vad_audio_length = sum(chunk.shape[0] for chunk in self.vad_buffer)
+        logging.info(f"VAD: Размер буфера {vad_audio_length}/{self.vad_buffer_size} сэмплов")
+        
         if vad_audio_length < self.vad_buffer_size:
+            logging.info("VAD: Недостаточно данных для анализа")
             return False  # Недостаточно данных для анализа
         
         # Объединяем данные для анализа
@@ -224,7 +231,6 @@ class AudioStream:
             
             return has_speech
         except Exception as e:
-            import logging
             logging.warning(f"Ошибка при использовании VAD: {e}. Переключение на определение по энергии.")
             return self._detect_speech_energy(audio)
     
@@ -257,6 +263,10 @@ class AudioStream:
                     time.sleep(0.01)
                     continue
                 
+                # Логируем состояние буфера
+                buffer_size = sum(chunk.shape[0] for chunk in self.audio_buffer)
+                logging.info(f"Обработка аудиобуфера: {len(self.audio_buffer)} чанков, {buffer_size} сэмплов")
+                
                 # Обработка накопленных аудиоданных
                 audio_chunk = torch.cat(self.audio_buffer)
                 self.audio_buffer = []
@@ -270,8 +280,13 @@ class AudioStream:
                 end_idx = min(i + self.chunk_size, audio_chunk.shape[0])
                 subchunk = audio_chunk[i:end_idx]
                 
+                # Логируем данные о подчанке
+                energy = (subchunk ** 2).mean().item()
+                logging.info(f"Обработка подчанка: {subchunk.shape[0]} сэмплов, энергия: {energy:.6f}, порог: {self.threshold:.6f}")
+                
                 # Обнаружение речи
                 is_speech = self._detect_speech(subchunk)
+                logging.info(f"Обнаружение речи: {is_speech}, использование VAD: {self.use_vad}")
                 
                 if is_speech:
                     # Если это начало речи, начинаем новый сегмент
