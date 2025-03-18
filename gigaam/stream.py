@@ -3,10 +3,16 @@ import numpy as np
 from typing import Optional, List, Union, Dict, Callable
 import threading
 import time
+import os
 
 from .model import GigaAMASR
 from .preprocess import FeatureExtractor
 from .utils import format_time
+try:
+    from .vad_utils import get_pipeline
+    VAD_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    VAD_AVAILABLE = False
 
 
 class AudioStream:
@@ -24,11 +30,15 @@ class AudioStream:
     buffer_size : int
         Максимальный размер буфера в секундах.
     threshold : float
-        Порог энергии для определения наличия речи.
+        Порог энергии для определения наличия речи (используется при отключенном VAD).
     min_silence_duration : float
         Минимальная продолжительность тишины в секундах для завершения сегмента.
     stabilization_frames : int
         Количество фреймов для стабилизации результата.
+    use_vad : bool
+        Использовать VAD для обнаружения речи.
+    vad_threshold : float
+        Порог для определения наличия речи с использованием VAD.
     callback : Optional[Callable]
         Функция обратного вызова для получения результатов распознавания.
     """
@@ -42,6 +52,8 @@ class AudioStream:
         threshold: float = 0.01,
         min_silence_duration: float = 0.8,
         stabilization_frames: int = 5,
+        use_vad: bool = True,
+        vad_threshold: float = 0.5,
         callback: Optional[Callable] = None,
     ):
         self.model = model
@@ -51,6 +63,23 @@ class AudioStream:
         self.threshold = threshold
         self.min_silence_samples = int(min_silence_duration * sample_rate)
         self.stabilization_frames = stabilization_frames
+        self.vad_threshold = vad_threshold
+        
+        # Проверка и настройка VAD
+        self.use_vad = use_vad and VAD_AVAILABLE
+        if self.use_vad:
+            if "HF_TOKEN" not in os.environ:
+                import warnings
+                warnings.warn("HF_TOKEN не найден в переменных окружения. VAD будет отключен. Используйте os.environ['HF_TOKEN'] = '...'")
+                self.use_vad = False
+            else:
+                try:
+                    self.device = next(self.model.parameters()).device
+                    self.vad = get_pipeline(self.device)
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"Не удалось загрузить VAD модель: {e}. VAD будет отключен.")
+                    self.use_vad = False
         
         # Буфер для хранения аудиоданных
         self.audio_buffer = []
@@ -61,6 +90,10 @@ class AudioStream:
         self.silence_counter = 0
         self.speaking_buffer = []
         self.last_end_time = 0
+        
+        # Буфер для VAD
+        self.vad_buffer = []
+        self.vad_buffer_size = 3 * sample_rate  # 3 секунды для VAD буфера
         
         # Результаты распознавания
         self.transcription_buffer = []
@@ -107,6 +140,94 @@ class AudioStream:
                 removed = self.audio_buffer.pop(0)
                 total_samples -= removed.shape[0]
     
+    def _detect_speech_energy(self, audio: torch.Tensor) -> bool:
+        """
+        Определяет наличие речи в аудиосегменте на основе энергии.
+        
+        Parameters
+        ----------
+        audio : torch.Tensor
+            Аудиоданные для анализа.
+            
+        Returns
+        -------
+        bool
+            True, если обнаружена речь, иначе False.
+        """
+        # Простой детектор речи на основе энергии
+        energy = (audio ** 2).mean().item()
+        return energy > self.threshold
+    
+    def _detect_speech_vad(self, audio: torch.Tensor) -> bool:
+        """
+        Определяет наличие речи с использованием VAD.
+        
+        Parameters
+        ----------
+        audio : torch.Tensor
+            Аудиоданные для анализа.
+            
+        Returns
+        -------
+        bool
+            True, если обнаружена речь, иначе False.
+        """
+        if not self.use_vad:
+            return self._detect_speech_energy(audio)
+        
+        # Добавляем данные в VAD буфер
+        self.vad_buffer.append(audio)
+        
+        # Если накоплено достаточно данных, анализируем
+        vad_audio_length = sum(chunk.shape[0] for chunk in self.vad_buffer)
+        if vad_audio_length < self.vad_buffer_size:
+            return False  # Недостаточно данных для анализа
+        
+        # Объединяем данные для анализа
+        vad_audio = torch.cat(self.vad_buffer)
+        
+        # Если буфер стал слишком большим, обрезаем его
+        if vad_audio.shape[0] > self.vad_buffer_size:
+            vad_audio = vad_audio[-self.vad_buffer_size:]
+            self.vad_buffer = [vad_audio]
+        
+        # Анализируем с помощью VAD
+        try:
+            import io
+            from pydub import AudioSegment
+            
+            # Преобразуем тензор в аудиофайл в памяти
+            audio_bytes = (vad_audio * 32767).to(torch.int16).cpu().numpy().tobytes()
+            audio_segment = AudioSegment(
+                audio_bytes,
+                frame_rate=self.sample_rate,
+                sample_width=2,
+                channels=1
+            )
+            
+            # Сохраняем во временный поток
+            audio_io = io.BytesIO()
+            audio_segment.export(audio_io, format="wav")
+            audio_io.seek(0)
+            
+            # Анализируем с помощью VAD
+            vad_result = self.vad({"uri": "stream", "audio": audio_io})
+            
+            # Проверяем наличие речи в последнем сегменте
+            has_speech = False
+            for segment in vad_result.get_timeline().support():
+                # Проверяем, что сегмент относится к последней части аудио
+                if segment.end > (vad_audio.shape[0] / self.sample_rate - 0.5):
+                    speech_proba = getattr(segment, 'score', 1.0)
+                    has_speech = speech_proba > self.vad_threshold
+                    break
+            
+            return has_speech
+        except Exception as e:
+            import logging
+            logging.warning(f"Ошибка при использовании VAD: {e}. Переключение на определение по энергии.")
+            return self._detect_speech_energy(audio)
+    
     def _detect_speech(self, audio: torch.Tensor) -> bool:
         """
         Определяет наличие речи в аудиосегменте.
@@ -121,68 +242,72 @@ class AudioStream:
         bool
             True, если обнаружена речь, иначе False.
         """
-        energy = (audio ** 2).mean().item()
-        return energy > self.threshold
+        if self.use_vad:
+            return self._detect_speech_vad(audio)
+        else:
+            return self._detect_speech_energy(audio)
     
     def _process_stream(self) -> None:
         """
-        Фоновый процесс для обработки аудиопотока.
+        Обрабатывает аудиопоток в отдельном потоке.
         """
         while self.running:
-            # Копируем текущий буфер для обработки
             with self.buffer_lock:
                 if not self.audio_buffer:
-                    time.sleep(0.01)  # Небольшая задержка, если буфер пуст
+                    time.sleep(0.01)
                     continue
                 
-                buffer_copy = self.audio_buffer.copy()
-                audio_segment = torch.cat(buffer_copy)
+                # Обработка накопленных аудиоданных
+                audio_chunk = torch.cat(self.audio_buffer)
+                self.audio_buffer = []
             
-            # Обнаружение речи
-            is_speech = self._detect_speech(audio_segment)
-            
-            # Логика обработки речи
-            if is_speech and not self.is_speaking:
-                # Начало речи
-                self.is_speaking = True
-                self.speaking_buffer = [audio_segment]
-                self.silence_counter = 0
+            # Обрабатываем аудиочанк порциями
+            for i in range(0, audio_chunk.shape[0], self.chunk_size):
+                if not self.running:
+                    break
                 
-            elif is_speech and self.is_speaking:
-                # Продолжение речи
-                self.speaking_buffer.append(audio_segment)
-                self.silence_counter = 0
+                # Получаем текущий подчанк
+                end_idx = min(i + self.chunk_size, audio_chunk.shape[0])
+                subchunk = audio_chunk[i:end_idx]
                 
-            elif not is_speech and self.is_speaking:
-                # Возможное завершение речи
-                self.silence_counter += audio_segment.shape[0]
+                # Обнаружение речи
+                is_speech = self._detect_speech(subchunk)
                 
-                if self.silence_counter >= self.min_silence_samples:
-                    # Завершение сегмента речи
-                    self._finalize_speech_segment()
+                if is_speech:
+                    # Если это начало речи, начинаем новый сегмент
+                    if not self.is_speaking:
+                        self.is_speaking = True
+                        self.speaking_buffer = [subchunk]
+                    else:
+                        self.speaking_buffer.append(subchunk)
+                    
+                    # Сбрасываем счетчик тишины
+                    self.silence_counter = 0
+                    
+                    # Выполняем промежуточное распознавание каждые N фреймов
+                    if len(self.speaking_buffer) % self.stabilization_frames == 0:
+                        self._perform_interim_recognition()
                 else:
-                    # Добавляем тишину в буфер речи, чтобы сохранить непрерывность
-                    self.speaking_buffer.append(audio_segment)
+                    # Если была речь, увеличиваем счетчик тишины
+                    if self.is_speaking:
+                        self.speaking_buffer.append(subchunk)
+                        self.silence_counter += subchunk.shape[0]
+                        
+                        # Если тишина достаточно длинная, завершаем сегмент
+                        if self.silence_counter >= self.min_silence_samples:
+                            self._finalize_speech_segment()
             
-            # Если речь активна, выполняем распознавание на накопленных данных
-            if self.is_speaking and len(self.speaking_buffer) >= self.stabilization_frames:
-                self._perform_interim_recognition()
-            
-            time.sleep(0.01)  # Предотвращение высокой загрузки CPU
+            # Пауза перед следующей итерацией
+            time.sleep(0.01)
     
     def _finalize_speech_segment(self) -> None:
         """
-        Завершает обработку сегмента речи и выполняет финальное распознавание.
+        Завершает обработку сегмента речи.
         """
-        if not self.speaking_buffer:
-            self.is_speaking = False
-            self.silence_counter = 0
-            return
-        
         # Объединяем буфер речи
         speech_segment = torch.cat(self.speaking_buffer)
         
-        # Получаем окончательный результат распознавания
+        # Распознаем речь
         transcript = self._recognize_audio(speech_segment)
         
         # Расчет временных меток
@@ -211,6 +336,8 @@ class AudioStream:
         self.silence_counter = 0
         self.speaking_buffer = []
         self.last_end_time = current_time
+        # Очищаем VAD буфер
+        self.vad_buffer = []
     
     def _perform_interim_recognition(self) -> None:
         """
@@ -310,6 +437,7 @@ class AudioStream:
         self.silence_counter = 0
         self.speaking_buffer = []
         self.interim_results = []
+        self.vad_buffer = []
     
     def stop(self) -> None:
         """
