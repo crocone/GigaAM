@@ -54,14 +54,22 @@ def segment_audio(
     """
     Segments an audio waveform into smaller chunks based on speech activity.
     The segmentation is performed using a PyAnnote voice activity detection pipeline.
+    Supports both waveform tensor and audio file input.
     """
+    # Если wav_tensor - это тензор, обрабатываем его как обычно
+    if isinstance(wav_tensor, torch.Tensor):
+        audio = AudioSegment(
+            wav_tensor.numpy().tobytes(),
+            frame_rate=sample_rate,
+            sample_width=wav_tensor.dtype.itemsize,
+            channels=1,
+        )
+    # Если wav_tensor - это путь к файлу, загружаем аудио через librosa
+    elif isinstance(wav_tensor, str):
+        audio = librosa.load(wav_tensor, sr=sample_rate)
+    else:
+        raise ValueError("wav_tensor must be either a path to an audio file or a waveform tensor")
 
-    audio = AudioSegment(
-        wav_tensor.numpy().tobytes(),
-        frame_rate=sample_rate,
-        sample_width=wav_tensor.dtype.itemsize,
-        channels=1,
-    )
     audio_bytes = BytesIO()
     audio.export(audio_bytes, format="wav")
     audio_bytes.seek(0)
@@ -76,7 +84,7 @@ def segment_audio(
     curr_end = 0.0
     boundaries: List[Tuple[float, float]] = []
 
-    # Concat segments from pipeline into chunks for asr according to max/min duration
+    # Concat segments from pipeline into chunks for ASR according to max/min duration
     for segment in sad_segments.get_timeline().support():
         start = max(0, segment.start)
         end = min(len(audio) / 1000, segment.end)
@@ -102,3 +110,4 @@ def segment_audio(
         boundaries.append((curr_start, curr_end))
 
     return segments, boundaries
+

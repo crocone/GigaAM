@@ -140,19 +140,28 @@ class GigaAMASR(GigaAM):
 
     @torch.inference_mode()
     def transcribe_longform(
-        self, wav_file: str, **kwargs
+            self, wav_file: str = None, waveform: torch.Tensor = None, sr: int = None, **kwargs
     ) -> List[Dict[str, Union[str, Tuple[float, float]]]]:
         """
         Transcribes a long audio file by splitting it into segments and
-        then transcribing each segment.
+        then transcribing each segment. Supports both file path and waveform input.
         """
         from .vad_utils import segment_audio
 
-        transcribed_segments = []
-        wav = load_audio(wav_file, return_format="int")
+        # Проверяем, передан ли путь к файлу или уже загруженный аудиофайл
+        if wav_file:
+            wav = load_audio(wav_file, return_format="int")
+        elif waveform is not None and sr is not None:
+            wav = waveform
+        else:
+            raise ValueError("Either 'wav_file' path or 'waveform' and 'sr' must be provided")
+
+        # Разбиение на сегменты
         segments, boundaries = segment_audio(
-            wav, SAMPLE_RATE, device=self._device, **kwargs
+            wav, sr, device=self._device, **kwargs
         )
+
+        transcribed_segments = []
         for segment, segment_boundaries in zip(segments, boundaries):
             wav = segment.to(self._device).unsqueeze(0).to(self._dtype)
             length = torch.full([1], wav.shape[-1], device=self._device)
