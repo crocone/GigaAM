@@ -52,42 +52,40 @@ def segment_audio(
     device: Union[str, torch.device] = "cpu",
 ) -> Tuple[List[torch.Tensor], List[Tuple[float, float]]]:
     """
-    Segments an audio waveform into smaller chunks based on speech activity.
-    The segmentation is performed using a PyAnnote voice activity detection pipeline.
-    Supports both waveform tensor and audio file input.
+    Segments audio into smaller chunks using VAD.
     """
-    # Если wav_tensor - это тензор, обрабатываем его как обычно
-    if isinstance(wav_tensor, torch.Tensor):
-        audio = AudioSegment(
-            wav_tensor.numpy().tobytes(),
-            frame_rate=sample_rate,
-            sample_width=wav_tensor.dtype.itemsize,
-            channels=1,
-        )
-    # Если wav_tensor - это путь к файлу, загружаем аудио через librosa
-    elif isinstance(wav_tensor, str):
-        audio = librosa.load(wav_tensor, sr=sample_rate)
-    else:
-        raise ValueError("wav_tensor must be either a path to an audio file or a waveform tensor")
+    print(f"[VAD] Segmenting audio tensor of shape {wav_tensor.shape}, sr={sample_rate}")
+
+    if not isinstance(wav_tensor, torch.Tensor):
+        raise TypeError("wav_tensor must be a torch.Tensor")
+
+    audio = AudioSegment(
+        wav_tensor.numpy().tobytes(),
+        frame_rate=sample_rate,
+        sample_width=wav_tensor.dtype.itemsize,
+        channels=1,
+    )
+
+    if len(audio) < 1000:
+        raise ValueError("Audio too short for segmentation")
 
     audio_bytes = BytesIO()
     audio.export(audio_bytes, format="wav")
     audio_bytes.seek(0)
 
-    # Process audio with pipeline to obtain segments with speech activity
     pipeline = get_pipeline(device)
     sad_segments = pipeline({"uri": "filename", "audio": audio_bytes})
 
     segments: List[torch.Tensor] = []
-    curr_duration = 0.0
+    boundaries: List[Tuple[float, float]] = []
     curr_start = 0.0
     curr_end = 0.0
-    boundaries: List[Tuple[float, float]] = []
+    curr_duration = 0.0
 
-    # Concat segments from pipeline into chunks for ASR according to max/min duration
     for segment in sad_segments.get_timeline().support():
         start = max(0, segment.start)
         end = min(len(audio) / 1000, segment.end)
+
         if (
             curr_duration > min_duration and start - curr_end > new_chunk_threshold
         ) or (curr_duration + (end - curr_end) > max_duration):
@@ -103,11 +101,16 @@ def segment_audio(
         curr_end = end
         curr_duration = curr_end - curr_start
 
+    # Последний сегмент
     if curr_duration != 0 and curr_end > curr_start:
         start_ms = int(curr_start * 1000)
         end_ms = int(curr_end * 1000)
-        segments.append(audiosegment_to_tensor(audio[start_ms:end_ms]))
-        boundaries.append((curr_start, curr_end))
+        tensor = audiosegment_to_tensor(audio[start_ms:end_ms])
+        if tensor.shape[-1] > 0:
+            segments.append(tensor)
+            boundaries.append((curr_start, curr_end))
 
+    print(f"[VAD] Found {len(segments)} segments")
     return segments, boundaries
+
 
