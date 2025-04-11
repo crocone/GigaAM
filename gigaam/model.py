@@ -4,6 +4,7 @@ import hydra
 import omegaconf
 import torch
 from torch import Tensor, nn
+import numpy as np
 
 from .preprocess import SAMPLE_RATE, load_audio
 from .utils import onnx_converter
