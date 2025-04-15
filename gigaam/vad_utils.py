@@ -66,9 +66,6 @@ def segment_audio(
         channels=1,
     )
 
-    if len(audio) < 1000:
-        raise ValueError("Audio too short for segmentation")
-
     audio_bytes = BytesIO()
     audio.export(audio_bytes, format="wav")
     audio_bytes.seek(0)

@@ -4,7 +4,6 @@ import hydra
 import omegaconf
 import torch
 from torch import Tensor, nn
-import numpy as np
 
 from .preprocess import SAMPLE_RATE, load_audio
 from .utils import onnx_converter
@@ -141,11 +140,7 @@ class GigaAMASR(GigaAM):
 
     @torch.inference_mode()
     def transcribe_longform(
-            self,
-            wav_file: str = None,
-            waveform: Union[torch.Tensor, np.ndarray] = None,
-            sr: int = None,
-            **kwargs
+            self, wav_file: str = None, waveform: torch.Tensor = None, sr: int = None, **kwargs
     ) -> List[Dict[str, Union[str, Tuple[float, float]]]]:
         """
         Transcribes a long audio file by splitting it into segments and
@@ -153,42 +148,31 @@ class GigaAMASR(GigaAM):
         """
         from .vad_utils import segment_audio
 
-        # Загрузка аудио
+        # Проверяем, передан ли путь к файлу или уже загруженный аудиофайл
         if wav_file:
-            print("[INFO] Loading from wav_file path...")
             wav = load_audio(wav_file, return_format="int")
-            sr = 16000  # можно сделать параметром
         elif waveform is not None and sr is not None:
-            print(f"[INFO] Received waveform of shape {getattr(waveform, 'shape', '?')}, sr={sr}")
-            if isinstance(waveform, np.ndarray):
-                waveform = torch.from_numpy(waveform)
-            elif not isinstance(waveform, torch.Tensor):
-                raise TypeError("waveform must be either a NumPy array or a torch.Tensor")
-            if waveform.ndim > 1:
-                waveform = waveform.squeeze()
-            if waveform.shape[-1] == 0:
-                raise ValueError("Waveform is empty. Check audio source.")
             wav = waveform
         else:
-            raise ValueError("Either 'wav_file' or both 'waveform' and 'sr' must be provided.")
+            raise ValueError("Either 'wav_file' path or 'waveform' and 'sr' must be provided")
 
         # Разбиение на сегменты
-        print("[INFO] Segmenting audio...")
-        segments, boundaries = segment_audio(wav, sr, device=self._device, **kwargs)
+        segments, boundaries = segment_audio(
+            wav, sr, device=self._device, **kwargs
+        )
 
-        print(f"[INFO] Got {len(segments)} segments")
         transcribed_segments = []
-        for i, (segment, segment_boundaries) in enumerate(zip(segments, boundaries)):
-            print(f"[INFO] Transcribing segment {i + 1}/{len(segments)}: {segment_boundaries}")
+        for segment, segment_boundaries in zip(segments, boundaries):
             wav = segment.to(self._device).unsqueeze(0).to(self._dtype)
             length = torch.full([1], wav.shape[-1], device=self._device)
             encoded, encoded_len = self.forward(wav, length)
             result = self.decoding.decode(self.head, encoded, encoded_len)[0]
-            transcribed_segments.append({
-                "transcription": result,
-                "boundaries": segment_boundaries,
-            })
-
+            transcribed_segments.append(
+                {
+                    "transcription": result,
+                    "boundaries": segment_boundaries,
+                }
+            )
         return transcribed_segments
 
 
